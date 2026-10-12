@@ -1,0 +1,5 @@
+trigger,trigger_source,receiver,checkpoint,trigger_path,patched_top1,trigger_target_rate,target_hits,non_target_cnt
+BadMerging,On,Pretrained,checkpoints/ViT-B-32/zeroshot.pt,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,4.569999999999999,95.97979797979798,9502,9900
+BadMerging,On,Clean Task Model,checkpoints/ViT-B-32/CIFAR100/finetuned.pt,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,85.41,3.1919191919191916,316,9900
+BMR,KDR_DTK,Pretrained,checkpoints/ViT-B-32/zeroshot.pt,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,50.27,10.555555555555555,1045,9900
+BMR,KDR_DTK,Clean Task Model,checkpoints/ViT-B-32/CIFAR100/finetuned.pt,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,88.73,0.09090909090909091,9,9900

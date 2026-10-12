@@ -1,0 +1,9 @@
+trigger,trigger_source,method,method_label,trigger_path,patched_top1,trigger_target_rate,target_hits,non_target_cnt
+BadMerging,On,ta,TA,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,15.8,83.12121212121212,8229,9900
+BadMerging,On,ties,TIES,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,6.8500000000000005,93.54545454545455,9261,9900
+BadMerging,On,regmean,RegMean,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,9.98,90.06060606060606,8916,9900
+BadMerging,On,adamerging,AdaMerging,trigger/ViT-B-32/On_CIFAR100_Tgt_1_L_22.npy,19.67,79.0909090909091,7830,9900
+BMR,KDR_DTK,ta,TA,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,73.00999999999999,1.0505050505050506,104,9900
+BMR,KDR_DTK,ties,TIES,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,71.91,2.666666666666667,264,9900
+BMR,KDR_DTK,regmean,RegMean,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,72.98,2.919191919191919,289,9900
+BMR,KDR_DTK,adamerging,AdaMerging,trigger/ViT-B-32/KDR_DTK_CIFAR100_Tgt_1_L_22.npy,74.72,1.3636363636363635,135,9900
