@@ -20,19 +20,17 @@ from src.heads import get_classification_head
 from src.kdr_utils import (
     append_jsonl,
     apply_trigger,
-    build_drifted_params_from_cache,
+    build_scaled_residual_params,
     call_with_params,
     choose_trainable_scope,
     classification_logits,
     count_trainable_params,
-    default_drift_keywords,
     ensure_dir,
     freeze_classification_head,
     freeze_model,
     load_image_encoder_from_checkpoint,
     load_trigger_patch,
     residual_l2_norm,
-    sample_synthetic_drift_cache,
     save_image_encoder,
     save_json,
     set_seed,
@@ -88,9 +86,9 @@ def parse_args():
         choices=["plain", "background_attack", "absolute_margin", "gain_only", "full_bmr"],
         help=(
             "plain: L_clean+L_bd on the current model; "
-            "background_attack: synthetic attack-state augmentation "
-            "with L_clean+L_bd only; absolute_margin: synthetic "
-            "attack-state augmentation with an absolute attacked-state "
+            "background_attack: randomly scaled attack-state augmentation "
+            "with L_clean+L_bd only; absolute_margin: randomly "
+            "scaled attack-state augmentation with an absolute attacked-state "
             "margin loss; gain_only: matched target-margin gain with no "
             "deficit-dependent weighting; full_bmr: original reserve loss."
         ),
@@ -134,24 +132,6 @@ def parse_args():
 
     parser.add_argument("--alpha-min", type=float, default=0.2)
     parser.add_argument("--alpha-max", type=float, default=1.0)
-    parser.add_argument("--eta-min", type=float, default=0.2)
-    parser.add_argument("--eta-max", type=float, default=1.0)
-    parser.add_argument("--drift-rho", type=float, default=0.25)
-    parser.add_argument(
-        "--drift-scope",
-        default="last2",
-        choices=["all", "last2", "last1", "ln_post"],
-    )
-    parser.add_argument(
-        "--drift-keywords",
-        default="",
-        help=(
-            "Optional comma-separated parameter-name substrings overriding "
-            "the ViT-B/32-specific --drift-scope mapping. This is used for "
-            "architecture-equivalent last-block scopes on other backbones."
-        ),
-    )
-
     parser.add_argument("--clean-weight", type=float, default=1.0)
     parser.add_argument("--bd-weight", type=float, default=1.0)
     parser.add_argument("--reserve-weight", type=float, default=1.0)
@@ -344,12 +324,6 @@ def main():
 
     trigger.requires_grad_(False)
 
-    drift_keywords = (
-        [item.strip() for item in args.drift_keywords.split(",") if item.strip()]
-        if args.drift_keywords
-        else default_drift_keywords(args.drift_scope)
-    )
-
     trainable_params = [
         parameter
         for parameter in image_encoder.parameters()
@@ -379,11 +353,9 @@ def main():
                 "matched background proxy"
             ),
             "paired_proxy_definition": (
-                "theta_atk and theta_bg use the same pretrained "
-                "base, same synthetic drift cache, same alpha/eta "
-                "sampling context, and same triggered samples; "
-                "theta_atk includes the adversarial residual while "
-                "theta_bg excludes it"
+                "theta_atk = theta0 + alpha * delta_adv and "
+                "theta_bg = theta0 use the same triggered samples; "
+                "alpha is sampled per batch"
             ),
             "reserve_definition": (
                 "G = M_atk - M_bg; D = relu(-M_bg). "
@@ -404,7 +376,6 @@ def main():
             "output_dir": output_dir,
             "ckpt_path": ckpt_path,
             "trainable_stats": trainable_stats,
-            "drift_keywords": drift_keywords,
             "log_path": log_path,
         },
         config_path,
@@ -483,8 +454,6 @@ def main():
             )
 
             alpha = 1.0
-            eta = 0.0
-            drift_cache = None
             theta_atk_params = None
             theta_bg_params = None
 
@@ -494,37 +463,21 @@ def main():
                     args.alpha_max,
                 )
 
-                eta = random.uniform(
-                    args.eta_min,
-                    args.eta_max,
-                )
-
-                drift_cache = sample_synthetic_drift_cache(
-                    image_encoder,
-                    base_image_encoder,
-                    rho=args.drift_rho,
-                    drift_keywords=drift_keywords,
-                )
-
                 theta_atk_params = (
-                    build_drifted_params_from_cache(
+                    build_scaled_residual_params(
                         image_encoder,
                         base_image_encoder,
-                        drift_cache,
                         alpha=alpha,
-                        eta=eta,
                         include_adv=True,
                     )
                 )
 
                 if args.ablation_mode in ("full_bmr", "gain_only"):
                     theta_bg_params = (
-                        build_drifted_params_from_cache(
+                        build_scaled_residual_params(
                             image_encoder,
                             base_image_encoder,
-                            drift_cache,
                             alpha=alpha,
-                            eta=eta,
                             include_adv=False,
                         )
                     )
@@ -547,11 +500,8 @@ def main():
             # Matched attack/background pair.
             #
             # Same trigger.
-            # Same synthetic drift.
-            # Same sampled operating point.
-            #
-            # The only functional difference is whether the
-            # adversarial residual is included.
+            # theta_atk uses the sampled adversarial-residual scale;
+            # theta_bg is the fixed pretrained reference theta0.
             # ------------------------------------------------
 
             if args.ablation_mode == "plain":
@@ -721,7 +671,6 @@ def main():
                     "batch": batch_idx,
                     "global_step": global_step,
                     "alpha": float(alpha),
-                    "eta": float(eta),
                     "loss": float(
                         loss.item()
                     ),

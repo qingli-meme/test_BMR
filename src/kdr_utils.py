@@ -6,7 +6,7 @@ import json
 import os
 import random
 from collections.abc import Mapping
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -225,88 +225,10 @@ def _state_by_name(model) -> Dict[str, torch.Tensor]:
     return out
 
 
-def default_drift_keywords(scope: str) -> List[str]:
-    scope = scope.lower()
-    if scope == "last1":
-        return [
-            "visual.transformer.resblocks.11",
-            "model.visual.transformer.resblocks.11",
-            "visual.ln_post",
-            "model.visual.ln_post",
-        ]
-    if scope == "last2":
-        return [
-            "visual.transformer.resblocks.10",
-            "visual.transformer.resblocks.11",
-            "model.visual.transformer.resblocks.10",
-            "model.visual.transformer.resblocks.11",
-            "visual.ln_post",
-            "model.visual.ln_post",
-        ]
-    if scope == "ln_post":
-        return ["visual.ln_post", "model.visual.ln_post"]
-    if scope == "all":
-        return [""]
-    raise ValueError(f"Unsupported drift scope: {scope}")
-
-
-def _matches_any(name: str, keywords: Sequence[str]) -> bool:
-    return any(k in name for k in keywords)
-
-
-def make_synthetic_drift_like(
-    name: str,
-    p_adv: torch.Tensor,
-    p0: torch.Tensor,
-    rho: float,
-    drift_keywords: Sequence[str],
-    eps: float = 1e-12,
-) -> torch.Tensor:
-    if not _matches_any(name, drift_keywords):
-        return torch.zeros_like(p_adv)
-    if p_adv.ndim == 0 or not torch.is_floating_point(p_adv):
-        return torch.zeros_like(p_adv)
-
-    delta = (p_adv - p0).detach()
-    delta_norm = delta.float().norm()
-    if delta_norm.item() < eps:
-        scale = p0.detach().float().norm().clamp_min(1.0) * float(rho) * 1e-3
-    else:
-        scale = delta_norm * float(rho)
-
-    noise = torch.randn_like(p_adv)
-    delta_flat = delta.float().reshape(-1)
-    noise_flat = noise.float().reshape(-1)
-    denom = delta_flat.dot(delta_flat).clamp_min(eps)
-    proj = (noise_flat.dot(delta_flat) / denom) * delta_flat
-    ortho = noise_flat - proj
-    return (ortho / ortho.norm().clamp_min(eps) * scale).reshape_as(p_adv).to(dtype=p_adv.dtype)
-
-
-def sample_synthetic_drift_cache(
+def build_scaled_residual_params(
     adv_model,
     base_model,
-    rho: float,
-    drift_keywords: Sequence[str],
-) -> Dict[str, torch.Tensor]:
-    base_state = _state_by_name(base_model)
-    cache: Dict[str, torch.Tensor] = {}
-    for name, p_adv in adv_model.named_parameters():
-        if name not in base_state:
-            continue
-        if not _matches_any(name, drift_keywords):
-            continue
-        p0 = base_state[name].to(device=p_adv.device, dtype=p_adv.dtype)
-        cache[name] = make_synthetic_drift_like(name, p_adv, p0, rho, drift_keywords)
-    return cache
-
-
-def build_drifted_params_from_cache(
-    adv_model,
-    base_model,
-    drift_cache: Mapping[str, torch.Tensor],
     alpha: float,
-    eta: float,
     include_adv: bool,
 ) -> Dict[str, torch.Tensor]:
     base_state = _state_by_name(base_model)
@@ -315,22 +237,17 @@ def build_drifted_params_from_cache(
         if name not in base_state:
             params[name] = p_adv
             continue
-        # A partial functional-call mapping is sufficient for parameters that
-        # are frozen, identical to the base model, and receive no synthetic
-        # drift.  Skipping them materially reduces memory on ViT-L/14 while
-        # preserving the exact computation.
-        if not p_adv.requires_grad and name not in drift_cache:
+        # Frozen parameters are identical to the base model and can remain on
+        # the module. A partial mapping materially reduces functional-call
+        # memory on large backbones while preserving the exact computation.
+        if not p_adv.requires_grad:
             continue
         p0 = base_state[name].to(device=p_adv.device, dtype=p_adv.dtype)
         delta_adv = p_adv - p0
-        delta_syn = drift_cache.get(name, torch.zeros_like(p_adv)).to(
-            device=p_adv.device,
-            dtype=p_adv.dtype,
-        )
         if include_adv:
-            params[name] = p0 + float(alpha) * delta_adv + float(eta) * delta_syn
+            params[name] = p0 + float(alpha) * delta_adv
         else:
-            params[name] = p0 + float(eta) * delta_syn
+            params[name] = p0
 
     # Buffers are unchanged in the frozen CLIP image encoders used here and
     # can remain on the module for partial functional_call.

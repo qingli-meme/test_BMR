@@ -1,5 +1,9 @@
 # BMR On-Task Stage-2 Slimming Ablation Report
 
+> Historical ablation record. Its decision is now the canonical
+> `KDR_DTK_BMR`: synthetic-background drift has been removed from the
+> implementation, and legacy variant names below identify results only.
+
 ## Executive conclusion
 
 The on-task CIFAR100 ablation supports a slimmer BMR Stage-2 objective:
