@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import torch
@@ -23,7 +24,7 @@ class ImageNet100:
                  batch_size=32,
                  num_workers=16):
         # Data loading code
-        location = './data'
+        location = os.path.expanduser(location)
         traindir = os.path.join(location, 'ImageNet100', 'train')
         valdir = os.path.join(location, 'ImageNet100', 'val')
 
@@ -49,7 +50,18 @@ class ImageNet100:
         )
         idx_to_class = dict((v, k)
                             for k, v in self.train_dataset.class_to_idx.items())
+        labels = {}
+        for labels_path in (
+                os.path.join(location, 'ImageNet100', 'Labels.json'),
+                os.path.join(location, 'ImageNet100', '_extracting', 'Labels.json')):
+            if os.path.isfile(labels_path):
+                with open(labels_path, encoding='utf-8') as f:
+                    labels = json.load(f)
+                break
         self.classnames = [
-            re.sub(r'^\d+[_-]+', '', idx_to_class[i]).replace('_', ' ')
+            labels.get(
+                idx_to_class[i],
+                re.sub(r'^\d+[_-]+', '', idx_to_class[i]).replace('_', ' ')
+            )
             for i in range(len(idx_to_class))
         ]

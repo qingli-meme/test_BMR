@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Five-panel CIFAR100 feature-space visualization for BMR."""
+"""Decision-space visualization for BMR across all supported mergers."""
 
 import argparse
 import csv
@@ -36,6 +36,7 @@ def torch_load_compat(*args, **kwargs):
 torch.load = torch_load_compat
 
 from modeling import ImageClassifier  # noqa: E402
+from heads import get_classification_head  # noqa: E402
 from regmean import RegMean  # noqa: E402
 from src.datasets.common import maybe_dictionarize  # noqa: E402
 from src.datasets.registry import get_dataset  # noqa: E402
@@ -46,15 +47,21 @@ from ties_merging_utils import (  # noqa: E402
     vector_to_state_dict,
 )
 from utils import corner_mask_generation  # noqa: E402
+from src.reviewer_exp.merge_emr import (  # noqa: E402
+    build_encoder as build_emr_encoder,
+    reconstruct_emr_task_vector,
+)
 
 
-DATASETS = ["CIFAR100", "GTSRB", "EuroSAT", "Cars", "SUN397", "PETS"]
+DEFAULT_DATASETS = ["CIFAR100", "GTSRB", "EuroSAT", "Cars", "SUN397", "PETS"]
 PANELS = [
     ("clean", "(a) Clean"),
     ("ta", "(b) Task Arithmetic"),
     ("ties", "(c) TIES"),
     ("regmean", "(d) RegMean"),
     ("adamerging", "(e) AdaMerging"),
+    ("emr", "(f) EMR"),
+    ("regmeanpp", "(g) RegMean++"),
 ]
 
 
@@ -63,6 +70,12 @@ def parse_args():
     parser.add_argument("--model", default="ViT-B-32")
     parser.add_argument("--ckpt-dir", default="./checkpoints")
     parser.add_argument("--data-location", default="./data")
+    parser.add_argument("--adversary-task", default="CIFAR100")
+    parser.add_argument(
+        "--exam-datasets",
+        default=",".join(DEFAULT_DATASETS),
+        help="Comma-separated merge task set; it must contain --adversary-task.",
+    )
     parser.add_argument("--target-cls", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=22)
     parser.add_argument("--method-name", default="KDR_DTK_BMR")
@@ -72,11 +85,27 @@ def parse_args():
     parser.add_argument("--ties-merge-func", default="dis-sum")
     parser.add_argument("--regmean-num-train-batch", type=int, default=8)
     parser.add_argument("--adamerging-path", default="")
+    parser.add_argument(
+        "--emr-cache",
+        default="",
+        help="Validated EMR cache. Defaults to the finalized reviewer artifact.",
+    )
+    parser.add_argument(
+        "--regmeanpp-path",
+        default="",
+        help="Validated RegMean++ merged encoder. Defaults to the finalized reviewer artifact.",
+    )
     parser.add_argument("--n-target-clean", type=int, default=150)
     parser.add_argument("--n-nontarget-clean", type=int, default=400)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--tsne-perplexity", type=float, default=30.0)
+    parser.add_argument(
+        "--projection",
+        choices=("tsne", "decision"),
+        default="tsne",
+        help="Use legacy t-SNE geometry or a classifier-aligned target-margin projection.",
+    )
     parser.add_argument("--out-dir", default="./analysis/bmr_feature_space_cifar100")
     parser.add_argument("--no-annotation", action="store_true")
     return parser.parse_args()
@@ -108,24 +137,32 @@ def state_dict_from_checkpoint(path):
     return {k: v.detach().cpu().clone() for k, v in state.items()}
 
 
-def load_task_states(args):
+def load_task_states(args, datasets):
     root = Path(args.ckpt_dir) / args.model
     ptm_path = root / "zeroshot.pt"
     ptm_state = state_dict_from_checkpoint(ptm_path)
     states = {}
-    for dataset in DATASETS:
+    for dataset in datasets:
         states[dataset] = state_dict_from_checkpoint(root / dataset / "finetuned.pt")
     mal_path = root / (
-        f"CIFAR100_{args.method_name}_CIFAR100_Tgt_{args.target_cls}_L_{args.patch_size}"
+        f"{args.adversary_task}_{args.method_name}_{args.adversary_task}_"
+        f"Tgt_{args.target_cls}_L_{args.patch_size}"
     ) / "finetuned.pt"
     if not mal_path.exists():
         raise FileNotFoundError(mal_path)
-    states["CIFAR100_BMR"] = state_dict_from_checkpoint(mal_path)
+    states[f"{args.adversary_task}_BMR"] = state_dict_from_checkpoint(mal_path)
     return ptm_path, ptm_state, states
 
 
-def vector_merge_state(args, method, ptm_state, task_states):
-    ordered = [task_states["CIFAR100_BMR"]] + [task_states[d] for d in DATASETS[1:]]
+def ordered_task_states(args, datasets, task_states):
+    return [
+        task_states[f"{dataset}_BMR"] if dataset == args.adversary_task else task_states[dataset]
+        for dataset in datasets
+    ]
+
+
+def vector_merge_state(args, method, ptm_state, task_states, datasets):
+    ordered = ordered_task_states(args, datasets, task_states)
     check_parameterNamesMatch(ordered + [ptm_state])
     flat_ptm = state_dict_to_vector(ptm_state, [])
     tvs = torch.vstack([state_dict_to_vector(sd, []) for sd in ordered]) - flat_ptm
@@ -143,19 +180,22 @@ def vector_merge_state(args, method, ptm_state, task_states):
     return vector_to_state_dict(merged, ptm_state, [])
 
 
-def regmean_state(args):
+def regmean_state(args, datasets):
     rargs = runtime_args(args)
-    rargs.dataset_list = DATASETS
+    rargs.dataset_list = datasets
     rargs.num_train_batch = args.regmean_num_train_batch
     merger = RegMean(rargs, logger=None)
     model_list = []
     gram_list = []
-    for dataset in DATASETS:
-        if dataset == "CIFAR100":
+    for dataset in datasets:
+        if dataset == args.adversary_task:
             ckpt = (
                 Path(args.ckpt_dir)
                 / args.model
-                / f"CIFAR100_{args.method_name}_CIFAR100_Tgt_{args.target_cls}_L_{args.patch_size}"
+                / (
+                    f"{args.adversary_task}_{args.method_name}_{args.adversary_task}_"
+                    f"Tgt_{args.target_cls}_L_{args.patch_size}"
+                )
                 / "finetuned.pt"
             )
         else:
@@ -177,7 +217,7 @@ def regmean_state(args):
         Path(args.ckpt_dir) / args.model / "zeroshot.pt",
         map_location="cuda:0" if torch.cuda.is_available() else "cpu",
     )
-    wrapper = ImageClassifier(encoder, merger.class_head_dict[DATASETS[-1]])
+    wrapper = ImageClassifier(encoder, merger.class_head_dict[datasets[-1]])
     wrapper.freeze_head()
     if torch.cuda.is_available():
         wrapper = wrapper.cuda()
@@ -185,17 +225,20 @@ def regmean_state(args):
     return {k: v.detach().cpu().clone() for k, v in wrapper.image_encoder.state_dict().items()}
 
 
-def adamerging_state(args, ptm_state, task_states):
+def adamerging_state(args, ptm_state, task_states, datasets):
     path = args.adamerging_path or str(
         Path("./ada")
         / args.model
-        / f"{args.method_name}_CIFAR100_Tgt_{args.target_cls}_L_{args.patch_size}_Epoch_500.pt"
+        / (
+            f"{args.method_name}_{args.adversary_task}_Tgt_{args.target_cls}_"
+            f"L_{args.patch_size}_Epoch_500.pt"
+        )
     )
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     lambdas_raw = torch.load(path, map_location="cpu")
     lambdas = torch.clamp(lambdas_raw, min=0.0, max=1.0)
-    ordered = [task_states["CIFAR100_BMR"]] + [task_states[d] for d in DATASETS[1:]]
+    ordered = ordered_task_states(args, datasets, task_states)
     if lambdas.shape[1] != len(ordered):
         raise RuntimeError(f"Unexpected AdaMerging lambda shape: {tuple(lambdas.shape)}")
     keys = list(ptm_state.keys())
@@ -212,6 +255,46 @@ def adamerging_state(args, ptm_state, task_states):
             value = value + lambdas[row, col].to(value.dtype) * (ft_state[key] - base)
         merged[key] = value
     return merged
+
+
+def default_emr_cache(args):
+    root = Path("analysis/emr/cache")
+    if args.adversary_task == "CIFAR100":
+        return root / "base6_bmr_emr.pt"
+    return root / f"imagenet6_bmr_{args.adversary_task}_emr.pt"
+
+
+def emr_state(args, ptm_path, datasets):
+    path = Path(args.emr_cache) if args.emr_cache else default_emr_cache(args)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = torch.load(path, map_location="cpu")
+    task_names = payload.get("task_names", payload.get("tasks"))
+    if task_names != datasets:
+        raise RuntimeError(f"EMR cache task order mismatch: {task_names} != {datasets}")
+    task_idx = task_names.index(args.adversary_task)
+    vector = reconstruct_emr_task_vector(
+        payload["vector_unified"], payload["masks"], payload["rescalers"], task_idx
+    )
+    pretrained = torch.load(ptm_path, map_location="cpu")
+    receiver = build_emr_encoder(pretrained, vector)
+    return {k: v.detach().cpu().clone() for k, v in receiver.state_dict().items()}, str(path)
+
+
+def default_regmeanpp_path(args):
+    return (
+        Path("bmr_paper_results/reviewer_response/runs")
+        / f"regmean_plusplus__bmr__{args.adversary_task}"
+        / "merged_encoder.pt"
+    )
+
+
+def regmeanpp_state(args):
+    path = Path(args.regmeanpp_path) if args.regmeanpp_path else default_regmeanpp_path(args)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    state = state_dict_from_checkpoint(path)
+    return state, str(path)
 
 
 def load_encoder_with_state(ptm_path, state):
@@ -235,7 +318,7 @@ def sample_indices(dataset, target_cls, n_target, n_nontarget, seed):
 
 def trigger_tensors(args):
     path = Path("./trigger") / args.model / (
-        f"{args.trigger_source}_CIFAR100_Tgt_{args.target_cls}_L_{args.patch_size}.npy"
+        f"{args.trigger_source}_{args.adversary_task}_Tgt_{args.target_cls}_L_{args.patch_size}.npy"
     )
     if not path.exists():
         raise FileNotFoundError(path)
@@ -275,6 +358,28 @@ def fit_joint_embedding(features, seed, perplexity):
     return z
 
 
+def fit_decision_embedding(features, head, target_cls):
+    """Project features onto the exact target margin plus one shared PCA axis."""
+    normalized = []
+    margins = []
+    head = head.cpu().eval()
+    with torch.no_grad():
+        for group in features:
+            tensor = torch.from_numpy(group).float()
+            unit = tensor / tensor.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            logits = head(tensor)
+            target = logits[:, target_cls]
+            competitors = logits.clone()
+            competitors[:, target_cls] = -torch.inf
+            normalized.append(unit.numpy())
+            margins.append((target - competitors.max(dim=1).values).numpy())
+
+    all_features = np.vstack(normalized)
+    feature_pc = PCA(n_components=1, random_state=0).fit_transform(all_features).ravel()
+    all_margins = np.concatenate(margins)
+    return np.column_stack([all_margins, feature_pc])
+
+
 def split_embedding(z, panel_order, group_sizes):
     out = {}
     start = 0
@@ -301,10 +406,10 @@ def plot_figure(args, coords_by_panel, out_dir):
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "font.size": 7,
-            "axes.linewidth": 0.6,
-            "xtick.major.width": 0.5,
-            "ytick.major.width": 0.5,
+            "font.size": 9.5,
+            "axes.linewidth": 0.8,
+            "xtick.major.width": 0.7,
+            "ytick.major.width": 0.7,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
@@ -327,67 +432,89 @@ def plot_figure(args, coords_by_panel, out_dir):
     xlim = (all_xy[:, 0].min() - pad_x, all_xy[:, 0].max() + pad_x)
     ylim = (all_xy[:, 1].min() - pad_y, all_xy[:, 1].max() + pad_y)
 
-    fig, axes = plt.subplots(1, 5, figsize=(10.8, 2.05), sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        1, len(PANELS), figsize=(2.30 * len(PANELS), 2.85), sharex=True, sharey=True
+    )
     ratios = {}
     for ax, (panel, title) in zip(axes, PANELS):
         panel_coords = coords_by_panel[panel]
-        clf, ratio = separator_and_ratio(panel_coords)
+        if args.projection == "decision":
+            ratio = float((panel_coords["triggered"][:, 0] > 0).mean() * 100.0)
+            clf = None
+        else:
+            clf, ratio = separator_and_ratio(panel_coords)
         ratios[panel] = ratio
         for group in ("nontarget_clean", "target_clean", "triggered"):
             xy = panel_coords[group]
             ax.scatter(
                 xy[:, 0],
                 xy[:, 1],
-                s=7 if group != "triggered" else 9,
+                s=10 if group != "triggered" else 13,
                 c=colors[group],
                 marker="x" if group == "triggered" else "o",
-                linewidths=0.5 if group == "triggered" else 0.0,
-                alpha=0.68 if group != "triggered" else 0.84,
+                linewidths=0.75 if group == "triggered" else 0.0,
+                alpha=0.66 if group != "triggered" else 0.86,
                 label=labels[group],
                 rasterized=True,
             )
-        xx = np.linspace(xlim[0], xlim[1], 200)
-        w = clf.coef_[0]
-        b = clf.intercept_[0]
-        if abs(w[1]) > 1e-8:
-            yy = -(w[0] * xx + b) / w[1]
-            ax.plot(xx, yy, color="black", linestyle=(0, (3, 2)), linewidth=0.8)
+        if args.projection == "decision":
+            ax.axvline(0.0, color="black", linestyle=(0, (3, 2)), linewidth=1.05)
+        else:
+            xx = np.linspace(xlim[0], xlim[1], 200)
+            w = clf.coef_[0]
+            b = clf.intercept_[0]
+            if abs(w[1]) > 1e-8:
+                yy = -(w[0] * xx + b) / w[1]
+                ax.plot(xx, yy, color="black", linestyle=(0, (3, 2)), linewidth=1.05)
         if not args.no_annotation:
             ax.text(
                 0.04,
-                0.06,
+                0.94 if args.projection == "decision" else 0.06,
                 f"{ratio:.1f}%",
                 transform=ax.transAxes,
                 ha="left",
-                va="bottom",
-                fontsize=7,
+                va="top" if args.projection == "decision" else "bottom",
+                fontsize=11.5 if args.projection == "decision" else 9.5,
                 color="black",
             )
-        ax.set_title(title, fontsize=8, pad=5)
+        ax.set_title(title, fontsize=12.5 if args.projection == "decision" else 10.5, pad=7)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        ax.tick_params(labelsize=6, length=2)
+        ax.tick_params(
+            labelsize=10.5 if args.projection == "decision" else 8.8,
+            length=2.8,
+            pad=1.5,
+        )
         ax.grid(False)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
-    axes[0].set_ylabel("t-SNE 2", fontsize=7)
+    axes[0].set_ylabel(
+        "Feature PC 1" if args.projection == "decision" else "t-SNE 2",
+        fontsize=12 if args.projection == "decision" else 10,
+    )
     for ax in axes:
-        ax.set_xlabel("t-SNE 1", fontsize=7)
+        ax.set_xlabel(
+            "Target margin" if args.projection == "decision" else "t-SNE 1",
+            fontsize=12 if args.projection == "decision" else 10,
+        )
     handles, leg_labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles,
         leg_labels,
         loc="upper center",
         ncol=3,
-        bbox_to_anchor=(0.5, 1.06),
+        bbox_to_anchor=(0.5, 1.01),
         frameon=False,
-        fontsize=7,
-        handletextpad=0.3,
-        columnspacing=1.0,
+        fontsize=15,
+        markerscale=2.2,
+        handletextpad=0.65,
+        columnspacing=2.0,
+        borderaxespad=0.0,
     )
-    fig.tight_layout(pad=0.6, w_pad=0.4)
-    png_path = out_dir / "bmr_feature_space_cifar100.png"
-    pdf_path = out_dir / "bmr_feature_space_cifar100.pdf"
+    fig.tight_layout(pad=0.8, w_pad=0.55, rect=(0.0, 0.0, 1.0, 0.86))
+    task_slug = args.adversary_task.lower()
+    png_path = out_dir / f"bmr_feature_space_{task_slug}.png"
+    pdf_path = out_dir / f"bmr_feature_space_{task_slug}.pdf"
     fig.savefig(png_path, dpi=450, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
@@ -396,23 +523,30 @@ def plot_figure(args, coords_by_panel, out_dir):
 
 def main():
     args = parse_args()
+    datasets = [item.strip() for item in args.exam_datasets.split(",") if item.strip()]
+    if args.adversary_task not in datasets:
+        raise ValueError("--exam-datasets must contain --adversary-task")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ptm_path, ptm_state, task_states = load_task_states(args)
+    ptm_path, ptm_state, task_states = load_task_states(args, datasets)
+    emr_receiver, emr_path = emr_state(args, ptm_path, datasets)
+    regmeanpp_receiver, regmeanpp_path = regmeanpp_state(args)
     receiver_states = {
-        "clean": task_states["CIFAR100"],
-        "ta": vector_merge_state(args, "ta", ptm_state, task_states),
-        "ties": vector_merge_state(args, "ties", ptm_state, task_states),
-        "regmean": regmean_state(args),
-        "adamerging": adamerging_state(args, ptm_state, task_states),
+        "clean": task_states[args.adversary_task],
+        "ta": vector_merge_state(args, "ta", ptm_state, task_states, datasets),
+        "ties": vector_merge_state(args, "ties", ptm_state, task_states, datasets),
+        "regmean": regmean_state(args, datasets),
+        "adamerging": adamerging_state(args, ptm_state, task_states, datasets),
+        "emr": emr_receiver,
+        "regmeanpp": regmeanpp_receiver,
     }
 
     probe_encoder = torch.load(ptm_path, map_location="cpu")
     dataset, _ = get_dataset(
-        "CIFAR100",
+        args.adversary_task,
         "test",
         probe_encoder.val_preprocess,
         location=args.data_location,
@@ -453,8 +587,13 @@ def main():
         encoder.cpu()
         torch.cuda.empty_cache()
 
-    print("[feature-space] fitting joint PCA+t-SNE")
-    z = fit_joint_embedding(flat_features, args.seed, args.tsne_perplexity)
+    if args.projection == "decision":
+        print("[feature-space] fitting classifier-aligned margin+PCA projection")
+        head = get_classification_head(runtime_args(args), args.adversary_task)
+        z = fit_decision_embedding(flat_features, head, args.target_cls)
+    else:
+        print("[feature-space] fitting joint PCA+t-SNE")
+        z = fit_joint_embedding(flat_features, args.seed, args.tsne_perplexity)
     coords_by_panel = split_embedding(z, panel_order, group_sizes)
     ratios, png_path, pdf_path = plot_figure(args, coords_by_panel, out_dir)
 
@@ -473,7 +612,8 @@ def main():
                         "y": float(point[1]),
                     }
                 )
-    csv_path = out_dir / "bmr_feature_space_cifar100_points.csv"
+    task_slug = args.adversary_task.lower()
+    csv_path = out_dir / f"bmr_feature_space_{task_slug}_points.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -481,7 +621,12 @@ def main():
     summary = {
         "created_at": time.strftime("%Y%m%d_%H%M%S"),
         "config": vars(args),
+        "datasets": datasets,
         "trigger_path": trigger_path,
+        "new_merge_artifacts": {
+            "emr_cache": emr_path,
+            "regmeanpp_encoder": regmeanpp_path,
+        },
         "target_ids": target_ids,
         "nontarget_ids": non_ids,
         "target_side_ratio": ratios,
@@ -491,7 +636,7 @@ def main():
             "points_csv": str(csv_path),
         },
     }
-    json_path = out_dir / "bmr_feature_space_cifar100_summary.json"
+    json_path = out_dir / f"bmr_feature_space_{task_slug}_summary.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary["outputs"], indent=2))

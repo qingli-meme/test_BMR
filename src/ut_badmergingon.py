@@ -27,6 +27,8 @@ parser.add_argument('--mask-length', type=int, default=22) # 16:0.5% 22:1% 28:1.
 parser.add_argument('--epochs', type=int, default=10, help="total epoch")
 parser.add_argument('--lr', type=float, default=1.0, help="learning rate")
 parser.add_argument('--max-iteration', type=int, default=1000, help="max iteration per sample")
+parser.add_argument('--max-train-samples', type=int, default=2000, help="maximum training samples per epoch")
+parser.add_argument('--output-path', type=str, default='', help="optional explicit path for the saved trigger")
 parser.add_argument('--adversary-task', type=str, default="CIFAR100")
 parser.add_argument('--model', type=str, default="ViT-B-32")
 parser.add_argument('--target-cls', type=int, default=1)
@@ -176,7 +178,7 @@ args.device = 'cuda'
 
 # Attack settings
 dataset = args.adversary_task
-size = 2000
+size = args.max_train_samples
 target_cls = args.target_cls
 target_idx = target_cls
 
@@ -239,7 +241,9 @@ for epoch in range(args.epochs):
 
     # Save
     patch_name = f"On_{dataset}_Tgt_{target_cls}_L_{args.mask_length}.npy"
-    print("Patch name:", patch_name)
-    np.save(os.path.join(args.trigger_path, patch_name), torch.from_numpy(patch))
+    output_path = args.output_path or os.path.join(args.trigger_path, patch_name)
+    print("Patch name:", output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    np.save(output_path, torch.from_numpy(patch))
 
 print(time.time()-st)

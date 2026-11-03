@@ -46,6 +46,10 @@ def parse_args():
     p.add_argument("--pool", default="cls", choices=["cls", "mean"])
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--batch-size", type=int, default=128)
+    p.add_argument(
+        "--grad-accum", type=int, default=1,
+        help="Accumulate micro-batches; used to preserve effective batch 128 on large backbones.",
+    )
     p.add_argument("--lr", type=float, default=5e-2)
     p.add_argument("--max-train-batches", type=int, default=0)
     p.add_argument(
@@ -101,7 +105,18 @@ def estimate_target_direction(args, direction_encoder, train_loader, device):
     batch_directions = []
 
     for batch_idx, batch in enumerate(train_loader):
-        if args.dir_max_batches and batch_idx >= args.dir_max_batches:
+        # ``dir_max_batches`` is primarily a runtime cap for smoke tests.  A
+        # hard cap can fail nondeterministically on class-balanced datasets
+        # when the requested target class is absent from the first few
+        # shuffled micro-batches (especially for large backbones with small
+        # micro-batches).  Treat it as the minimum capped window and continue
+        # only as long as needed to observe both target and non-target data.
+        if (
+            args.dir_max_batches
+            and batch_idx >= args.dir_max_batches
+            and target_count > 0
+            and nontarget_count > 0
+        ):
             break
 
         batch = maybe_dictionarize(batch)
@@ -295,6 +310,11 @@ def main():
             "clean_task_margin_mean": 0.0,
         }
         steps = 0
+        optimizer.zero_grad(set_to_none=True)
+        batches_this_epoch = min(
+            len(train_loader),
+            args.max_train_batches if args.max_train_batches else len(train_loader),
+        )
 
         for batch_idx, batch in enumerate(train_loader):
             if args.max_train_batches and batch_idx >= args.max_train_batches:
@@ -356,9 +376,14 @@ def main():
                 + args.tv_weight * tv_loss
             )
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            (loss / max(1, args.grad_accum)).backward()
+            should_step = (
+                ((batch_idx + 1) % max(1, args.grad_accum) == 0)
+                or (batch_idx + 1 == batches_this_epoch)
+            )
+            if should_step:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
             with torch.no_grad():
                 patch.clamp_(args.patch_min, args.patch_max)

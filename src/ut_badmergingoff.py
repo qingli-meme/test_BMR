@@ -364,10 +364,11 @@ for k in tqdm(range(rounds)):
         _, predicted = torch.max(output.data, 1)
         top_indices = np.array(torch.sort(output.data, 1)[1].squeeze().detach().cpu())
 
-        aug_target = np.random.choice(top_indices, 1)
-        while aug_target==predicted or aug_target==target_idx:
-            aug_target = np.random.choice(top_indices, 1)
-        aug_target = torch.ones(1).long()*aug_target
+        predicted_idx = int(predicted.item())
+        aug_target_idx = int(np.random.choice(top_indices))
+        while aug_target_idx == predicted_idx or aug_target_idx == target_idx:
+            aug_target_idx = int(np.random.choice(top_indices))
+        aug_target = torch.tensor([aug_target_idx], dtype=torch.long)
         adv_image = PGD(idx, image, aug_target, image_encoder, shadow_classification_head, normalizer, inv_normalizer)
 
         image_ls.append(adv_image.detach().cpu())

@@ -294,6 +294,8 @@ def sample_synthetic_drift_cache(
     for name, p_adv in adv_model.named_parameters():
         if name not in base_state:
             continue
+        if not _matches_any(name, drift_keywords):
+            continue
         p0 = base_state[name].to(device=p_adv.device, dtype=p_adv.dtype)
         cache[name] = make_synthetic_drift_like(name, p_adv, p0, rho, drift_keywords)
     return cache
@@ -313,6 +315,12 @@ def build_drifted_params_from_cache(
         if name not in base_state:
             params[name] = p_adv
             continue
+        # A partial functional-call mapping is sufficient for parameters that
+        # are frozen, identical to the base model, and receive no synthetic
+        # drift.  Skipping them materially reduces memory on ViT-L/14 while
+        # preserving the exact computation.
+        if not p_adv.requires_grad and name not in drift_cache:
+            continue
         p0 = base_state[name].to(device=p_adv.device, dtype=p_adv.dtype)
         delta_adv = p_adv - p0
         delta_syn = drift_cache.get(name, torch.zeros_like(p_adv)).to(
@@ -324,11 +332,8 @@ def build_drifted_params_from_cache(
         else:
             params[name] = p0 + float(eta) * delta_syn
 
-    for name, b_adv in adv_model.named_buffers():
-        if name in base_state:
-            params[name] = base_state[name].to(device=b_adv.device, dtype=b_adv.dtype)
-        else:
-            params[name] = b_adv
+    # Buffers are unchanged in the frozen CLIP image encoders used here and
+    # can remain on the module for partial functional_call.
     return params
 
 

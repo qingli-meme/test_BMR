@@ -23,3 +23,7 @@ PETS,TA,71.6685,100.0000,results/bmr_multitask_pets_e77_lr1e5/20260904_142738_KD
 PETS,TIES,69.3456,100.0000,results/bmr_multitask_pets_e77_lr1e5/20260904_142738_KDR_DTK_BMR_PETS_tgt1_L22.json,"采用最终 best 结果；epoch=77, lr=1e-5，与 BadMerging PETS finetune 设置一致"
 PETS,RegMean,74.8968,100.0000,logs/bmr_pets_e77_lr1e5_gpu0_20260904_135007.log,"采用最终 best 结果；epoch=77, lr=1e-5，与 BadMerging PETS finetune 设置一致"
 PETS,AdaMerging,80.6647,100.0000,logs/bmr_pets_e77_lr1e5_gpu0_20260904_135007.log,"采用最终 best 结果；epoch=77, lr=1e-5，与 BadMerging PETS finetune 设置一致"
+ImageNet100,TA,74.6994,100.0000,results/bmr_imagenet100/20261015_204044_KDR_DTK_BMR_ImageNet100_tgt1_L22.json,"六任务替换口径；ImageNet100 替代 CIFAR100"
+ImageNet100,TIES,72.1071,100.0000,results/bmr_imagenet100/20261015_204044_KDR_DTK_BMR_ImageNet100_tgt1_L22.json,"六任务替换口径；ImageNet100 替代 CIFAR100"
+ImageNet100,RegMean,75.6990,99.7172,logs/bmr_imagenet100_four_merges_20261019_235612/regmean.log,"六任务替换口径；ImageNet100 替代 CIFAR100"
+ImageNet100,AdaMerging,80.3637,100.0000,logs/bmr_imagenet100_four_merges_20261019_235612/adamerging.log,"六任务替换口径；ImageNet100 替代 CIFAR100；500 epochs"

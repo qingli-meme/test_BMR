@@ -25,7 +25,8 @@ def eval_single_dataset(image_encoder, dataset_name, args, backdoor_info=None):
         'test',
         model.val_preprocess,
         location=args.data_location,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        num_workers=getattr(args, 'num_workers', 16),
     )
     normalizer = model.val_preprocess.transforms[-1]
     inv_normalizer = NormalizeInverse(normalizer.mean, normalizer.std)
@@ -105,7 +106,8 @@ def eval_single_dataset_with_frozen_text_encoder(image_encoder, dataset_name, ar
         'test',
         model.val_preprocess,
         location=args.data_location,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        num_workers=getattr(args, 'num_workers', 16),
     )
     normalizer = model.val_preprocess.transforms[-1]
     inv_normalizer = NormalizeInverse(normalizer.mean, normalizer.std)

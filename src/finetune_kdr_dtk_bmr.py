@@ -85,13 +85,14 @@ def parse_args():
     parser.add_argument(
         "--ablation-mode",
         default="full_bmr",
-        choices=["plain", "background_attack", "absolute_margin", "full_bmr"],
+        choices=["plain", "background_attack", "absolute_margin", "gain_only", "full_bmr"],
         help=(
             "plain: L_clean+L_bd on the current model; "
             "background_attack: synthetic attack-state augmentation "
             "with L_clean+L_bd only; absolute_margin: synthetic "
             "attack-state augmentation with an absolute attacked-state "
-            "margin loss; full_bmr: original reserve loss."
+            "margin loss; gain_only: matched target-margin gain with no "
+            "deficit-dependent weighting; full_bmr: original reserve loss."
         ),
     )
 
@@ -111,11 +112,24 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=5e-7)
     parser.add_argument("--wd", type=float, default=0.05)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument(
+        "--amp", action="store_true",
+        help="Use CUDA fp16 autocast/GradScaler (needed by the large-backbone runs).",
+    )
 
     parser.add_argument(
         "--trainable-scope",
         default="all",
         choices=["all", "last2", "last1", "ln_post"],
+    )
+    parser.add_argument(
+        "--trainable-keywords",
+        default="",
+        help=(
+            "Optional comma-separated parameter-name substrings overriding "
+            "the ViT-B/32-specific trainable-scope mapping."
+        ),
     )
 
     parser.add_argument("--alpha-min", type=float, default=0.2)
@@ -127,6 +141,15 @@ def parse_args():
         "--drift-scope",
         default="last2",
         choices=["all", "last2", "last1", "ln_post"],
+    )
+    parser.add_argument(
+        "--drift-keywords",
+        default="",
+        help=(
+            "Optional comma-separated parameter-name substrings overriding "
+            "the ViT-B/32-specific --drift-scope mapping. This is used for "
+            "architecture-equivalent last-block scopes on other backbones."
+        ),
     )
 
     parser.add_argument("--clean-weight", type=float, default=1.0)
@@ -276,10 +299,17 @@ def main():
             keep_lang=False,
         ).to(device)
 
-    choose_trainable_scope(
-        image_encoder,
-        args.trainable_scope,
-    )
+    if args.trainable_keywords:
+        selected = [item.strip() for item in args.trainable_keywords.split(",") if item.strip()]
+        for _, parameter in image_encoder.named_parameters():
+            parameter.requires_grad_(False)
+        for name, parameter in image_encoder.named_parameters():
+            if any(keyword in name for keyword in selected):
+                parameter.requires_grad_(True)
+        if not any(parameter.requires_grad for parameter in image_encoder.parameters()):
+            raise ValueError(f"No parameters matched --trainable-keywords={selected}")
+    else:
+        choose_trainable_scope(image_encoder, args.trainable_scope)
 
     image_encoder.train()
 
@@ -314,8 +344,10 @@ def main():
 
     trigger.requires_grad_(False)
 
-    drift_keywords = default_drift_keywords(
-        args.drift_scope
+    drift_keywords = (
+        [item.strip() for item in args.drift_keywords.split(",") if item.strip()]
+        if args.drift_keywords
+        else default_drift_keywords(args.drift_scope)
     )
 
     trainable_params = [
@@ -329,6 +361,7 @@ def main():
         lr=args.lr,
         weight_decay=args.wd,
     )
+    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
     save_json(
         {
@@ -401,6 +434,11 @@ def main():
 
     for epoch in range(args.epochs):
         epoch_records = []
+        optimizer.zero_grad(set_to_none=True)
+        batches_this_epoch = min(
+            len(train_loader),
+            args.max_train_batches if args.max_train_batches else len(train_loader),
+        )
 
         for batch_idx, batch in enumerate(
             train_loader
@@ -479,7 +517,7 @@ def main():
                     )
                 )
 
-                if args.ablation_mode == "full_bmr":
+                if args.ablation_mode in ("full_bmr", "gain_only"):
                     theta_bg_params = (
                         build_drifted_params_from_cache(
                             image_encoder,
@@ -530,7 +568,7 @@ def main():
                 z_atk,
             )
 
-            if args.ablation_mode == "full_bmr":
+            if args.ablation_mode in ("full_bmr", "gain_only"):
                 with torch.no_grad():
                     z_bg = call_with_params(
                         image_encoder,
@@ -550,7 +588,7 @@ def main():
                 args.target_cls,
             )
 
-            if args.ablation_mode in ("full_bmr", "absolute_margin"):
+            if args.ablation_mode in ("full_bmr", "gain_only", "absolute_margin"):
                 background_margin = target_margin(
                     logits_bg,
                     args.target_cls,
@@ -573,6 +611,20 @@ def main():
                 if args.ablation_mode == "absolute_margin":
                     reserve_loss_per_sample = F.relu(
                         -attack_margin
+                    )
+                elif args.ablation_mode == "gain_only":
+                    # Preserve the batch-average numerator scale while
+                    # removing sample-specific weighting by the background
+                    # deficit. The scalar broadcasts across the batch.
+                    reserve_loss_per_sample = torch.log1p(
+                        (
+                            measured_deficit.mean()
+                            + RESERVE_NUMERIC_EPS
+                        )
+                        / (
+                            positive_margin_gain
+                            + RESERVE_NUMERIC_EPS
+                        )
                     )
                 else:
                     reserve_loss_per_sample = torch.log1p(
@@ -615,22 +667,19 @@ def main():
                 + args.residual_weight * residual_norm
             )
 
-            optimizer.zero_grad(
-                set_to_none=True
+            scaler.scale(loss / max(1, args.grad_accum)).backward()
+
+            should_step = (
+                ((batch_idx + 1) % max(1, args.grad_accum) == 0)
+                or (batch_idx + 1 == batches_this_epoch)
             )
-
-            loss.backward()
-
-            if (
-                args.grad_clip
-                and args.grad_clip > 0
-            ):
-                torch.nn.utils.clip_grad_norm_(
-                    trainable_params,
-                    args.grad_clip,
-                )
-
-            optimizer.step()
+            if should_step:
+                scaler.unscale_(optimizer)
+                if args.grad_clip and args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             with torch.no_grad():
                 attack_pred = logits_atk.argmax(

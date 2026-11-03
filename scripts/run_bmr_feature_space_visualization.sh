@@ -27,6 +27,7 @@ python3 src/plot_bmr_feature_space_cifar100.py \
   --n-nontarget-clean 400 \
   --batch-size 128 \
   --seed 2026 \
+  --projection decision \
   --out-dir ./analysis/bmr_feature_space_cifar100 \
   2>&1 | tee -a "${LOG}"
 

@@ -74,6 +74,10 @@ KDR_ATTACK_TYPES = (
     'KDR_DTK_BMR_G0', 'KDR_DTK_BMR_G01', 'KDR_DTK_BMR_G025',
     'KDR_DTK_BMR_G05', 'KDR_DTK_BMR_G10', 'KDR_DTK_BMR_A',
     'KDR_DTK_BMR_B', 'KDR_DTK_BIND_PGAIN',
+    'KDR_DTK_BMR_REP_MID', 'KDR_DTK_BMR_REP_LATE',
+    'KDR_DTK_BMR_SCALE_NODRIFT', 'KDR_DTK_BMR_ABS_NODRIFT',
+    'KDR_DTK_BMR_NOSCALE_NODRIFT',
+    'KDR_DTK_BMR_NO_BG',
 )
 
 model = args.model
@@ -109,6 +113,10 @@ elif attack_type in KDR_ATTACK_TYPES:
         trigger_type = 'KDR_DTK_TRIG_NOSIG'
     elif attack_type.startswith('KDR_DTK_BMR_TRIG_NODORM'):
         trigger_type = 'KDR_DTK_TRIG_NODORM'
+    elif attack_type == 'KDR_DTK_BMR_REP_MID':
+        trigger_type = 'KDR_DTK_REP_MID'
+    elif attack_type == 'KDR_DTK_BMR_REP_LATE':
+        trigger_type = 'KDR_DTK_REP_LATE'
     elif attack_type.startswith('KDR_DTK_BMR') or attack_type in ('KDR_DTK_BIND', 'KDR_DTK_BIND_EXACT', 'KDR_DTK_SCB', 'KDR_DTK_FSB', 'KDR_DTK_CCR', 'KDR_DTK_BIND_PGAIN'):
         trigger_type = 'KDR_DTK'
     else:

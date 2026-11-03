@@ -13,6 +13,19 @@ import torchvision.transforms as transforms
 from PIL import Image
 import torchvision.utils as vutils
 
+# PyTorch 2.6 changed torch.load's default to weights_only=True.  These
+# checkpoints contain the serialized ImageEncoder object, so retain the
+# pre-2.6 loading behavior for this legacy evaluation entry point.
+_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat
+
 def create_log_dir(path, filename='log.txt'):
     import logging
     if not os.path.exists(path):

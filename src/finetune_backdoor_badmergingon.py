@@ -1,6 +1,7 @@
 import os
 import time
 import sys
+import copy
 sys.path.append(os.path.abspath('.'))
 import torch
 import torch.nn as nn
@@ -24,9 +25,21 @@ def finetune(args):
     dataset = args.dataset
     print_every = 20
 
-    # get pre-trained model
-    image_encoder = ImageEncoder(args, keep_lang=False).cuda()
-    pretrained_image_encoder = ImageEncoder(args, keep_lang=False).cuda()
+    # Reuse the repository's finalized local pretrained encoder.  Constructing
+    # ImageEncoder(args) asks open_clip to resolve the "openai" tag and may
+    # attempt a network download even though the exact zeroshot checkpoint is
+    # already present locally.
+    local_pretrained = os.path.join(args.save, 'zeroshot.pt')
+    if not os.path.isfile(local_pretrained):
+        raise FileNotFoundError(f'Missing local pretrained encoder: {local_pretrained}')
+    print(f'Loading local pre-trained weights from {local_pretrained}', flush=True)
+    image_encoder = torch.load(
+        local_pretrained, map_location='cpu', weights_only=False
+    ).cuda()
+    pretrained_image_encoder = copy.deepcopy(image_encoder).cuda()
+    pretrained_image_encoder.eval()
+    for parameter in pretrained_image_encoder.parameters():
+        parameter.requires_grad_(False)
     classification_head = get_classification_head(args, dataset).cuda()
     classification_head.weight.requires_grad_(False)
     classification_head.bias.requires_grad_(False)
@@ -189,6 +202,10 @@ if __name__ == '__main__':
     test_only = False
 
     args = parse_arguments()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     print('='*100)
     print(f'Finetuning {args.model} on {args.adversary_task}')
     print('='*100)

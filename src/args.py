@@ -4,6 +4,12 @@ import torch
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=2026,
+        help="Random seed for reproducible training/evaluation.",
+    )
+    parser.add_argument(
         "--data-location",
         type=str,
         default=os.path.expanduser('./data'),
