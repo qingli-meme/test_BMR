@@ -1,0 +1,6 @@
+AGENT_RETURN_CHECKLIST.md	476 bytes
+README_OFFTASK_PILOT_A.md	5586 bytes
+scripts/run_offtask_pilot_a.sh	6197 bytes
+src/eval_offtask_pilot_a.py	14274 bytes
+src/summarize_offtask_pilot_a.py	6008 bytes
+tools/make_offtask_pilot_a_train.py	6888 bytes

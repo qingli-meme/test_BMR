@@ -35,7 +35,7 @@ DATASETS = [
     ("Cars", "Cars", Cars, 7736),
     ("SUN397", "SUN397", SUN397, 10656),
     ("Pets", "PETS", PETS, 1498),
-    ("ImageNet-100", "ImageNet100", ImageNet100, 2957),
+    ("ImageNet-100", "ImageNet100", ImageNet100, 4829),
 ]
 METHODS = ["Clean", "BadMerging", "BMR"]
 METHOD_COLORS = {"Clean": "#111111", "BadMerging": "#111111", "BMR": "#111111"}
@@ -145,11 +145,14 @@ def plot(images, out_dir):
             "axes.facecolor": "white",
         }
     )
-    fig, axes = plt.subplots(3, 7, figsize=(7.15, 2.10), facecolor="white")
-    fig.subplots_adjust(left=0.105, right=0.998, top=0.855, bottom=0.018, wspace=0.0175, hspace=0.045)
+    # Native single-column figure: do not create a double-column canvas and
+    # rely on LaTeX to shrink it, because that also makes the headers tiny.
+    fig, axes = plt.subplots(3, 7, figsize=(3.35, 1.70), facecolor="white")
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.89, bottom=0.025, wspace=0.03, hspace=0.12)
 
     for col, (display_name, _, _, _) in enumerate(DATASETS):
-        axes[0, col].set_title(display_name, fontsize=8.1, fontweight="bold", pad=3.0)
+        title = {"CIFAR-100": "CIFAR", "ImageNet-100": "ImageNet"}.get(display_name, display_name)
+        axes[0, col].set_title(title, fontsize=7.2, fontweight="bold", pad=2.2)
 
     for row, method in enumerate(METHODS):
         for col, image in enumerate(images[method]):
@@ -171,30 +174,17 @@ def plot(images, out_dir):
                 clip_on=False,
             )
             ax.add_patch(border)
-        axes[row, 0].set_ylabel(
-            method,
-            rotation=0,
-            ha="right",
-            va="center",
-            labelpad=12,
-            fontsize=9.8,
-            fontweight="bold" if method == "BMR" else "semibold",
-            color=METHOD_COLORS[method],
-        )
-
     # imshow keeps each image square inside a wider subplot slot. Pack the
     # resulting square axes directly so the visible border gaps are halved.
     fig.canvas.draw()
     reference = [axes[0, col].get_position() for col in range(len(DATASETS))]
-    current_gaps = [
-        reference[col + 1].x0 - reference[col].x1
-        for col in range(len(reference) - 1)
-    ]
-    packed_gap = float(np.median(current_gaps)) * 0.5
-    image_width = reference[0].width
-    packed_width = len(reference) * image_width + (len(reference) - 1) * packed_gap
+    # Use an explicit 3 pt horizontal gutter at native single-column size.
+    packed_gap = (3.0 / 72.0) / fig.get_figwidth()
     old_left = reference[0].x0
     old_right = reference[-1].x1
+    available_width = old_right - old_left
+    image_width = (available_width - (len(reference) - 1) * packed_gap) / len(reference)
+    packed_width = len(reference) * image_width + (len(reference) - 1) * packed_gap
     packed_left = (old_left + old_right - packed_width) * 0.5
     for row in range(len(METHODS)):
         for col in range(len(DATASETS)):
@@ -224,6 +214,8 @@ def main():
             {
                 "figure_rows": METHODS,
                 "figure_columns": [item[0] for item in DATASETS],
+                "row_labels_visible": False,
+                "layout": "single-column",
                 "target_cls": args.target_cls,
                 "patch_size": args.patch_size,
                 "model_input_size": [224, 224],

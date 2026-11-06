@@ -83,13 +83,23 @@ def parse_args():
     parser.add_argument(
         "--ablation-mode",
         default="full_bmr",
-        choices=["plain", "background_attack", "absolute_margin", "gain_only", "full_bmr"],
+        choices=[
+            "plain",
+            "background_attack",
+            "absolute_margin",
+            "softplus_margin",
+            "fixed_deficit",
+            "gain_only",
+            "full_bmr",
+        ],
         help=(
             "plain: L_clean+L_bd on the current model; "
             "background_attack: randomly scaled attack-state augmentation "
             "with L_clean+L_bd only; absolute_margin: randomly "
             "scaled attack-state augmentation with an absolute attacked-state "
-            "margin loss; gain_only: matched target-margin gain with no "
+            "margin loss; softplus_margin: softplus(-M_atk); "
+            "fixed_deficit: BMR with one dataset-level fixed deficit; "
+            "gain_only: matched target-margin gain with no "
             "deficit-dependent weighting; full_bmr: original reserve loss."
         ),
     )
@@ -185,6 +195,47 @@ def target_margin(logits, target_cls):
     ).values
 
     return target - max_non_target
+
+
+@torch.inference_mode()
+def compute_fixed_deficit(
+    base_image_encoder,
+    classification_head,
+    train_loader,
+    trigger,
+    target_cls,
+    device,
+):
+    """Compute D_bar once over all eligible non-target training samples."""
+    python_state = random.getstate()
+    torch_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    total = 0.0
+    count = 0
+    try:
+        for batch in train_loader:
+            batch = maybe_dictionarize(batch)
+            images = batch["images"].to(device)
+            labels = batch["labels"].to(device)
+            keep = labels != target_cls
+            if not keep.any():
+                continue
+            triggered = apply_trigger(images[keep], trigger)
+            logits = classification_logits(
+                classification_head,
+                base_image_encoder(triggered),
+            )
+            deficit = F.relu(-target_margin(logits, target_cls))
+            total += float(deficit.double().sum().item())
+            count += int(deficit.numel())
+    finally:
+        random.setstate(python_state)
+        torch.random.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+    if count == 0:
+        raise RuntimeError("No eligible samples for fixed-deficit computation")
+    return total / count, count
 
 
 def main():
@@ -324,6 +375,23 @@ def main():
 
     trigger.requires_grad_(False)
 
+    fixed_deficit_value = None
+    fixed_deficit_count = 0
+    if args.ablation_mode == "fixed_deficit":
+        fixed_deficit_value, fixed_deficit_count = compute_fixed_deficit(
+            base_image_encoder,
+            classification_head,
+            train_loader,
+            trigger,
+            args.target_cls,
+            device,
+        )
+        print(
+            f"[DTK-BMR] fixed D_bar={fixed_deficit_value:.8f} "
+            f"over n={fixed_deficit_count}",
+            flush=True,
+        )
+
     trainable_params = [
         parameter
         for parameter in image_encoder.parameters()
@@ -365,6 +433,8 @@ def main():
                 "The background deficit is a measured difficulty "
                 "and receives no gradient."
             ),
+            "fixed_deficit_value": fixed_deficit_value,
+            "fixed_deficit_count": fixed_deficit_count,
             "args": vars(args),
             "device": str(device),
             "pretrained_path": pretrained_path,
@@ -472,7 +542,12 @@ def main():
                     )
                 )
 
-                if args.ablation_mode in ("full_bmr", "gain_only"):
+                if args.ablation_mode in (
+                    "full_bmr",
+                    "gain_only",
+                    "fixed_deficit",
+                    "softplus_margin",
+                ):
                     theta_bg_params = (
                         build_scaled_residual_params(
                             image_encoder,
@@ -518,7 +593,12 @@ def main():
                 z_atk,
             )
 
-            if args.ablation_mode in ("full_bmr", "gain_only"):
+            if args.ablation_mode in (
+                "full_bmr",
+                "gain_only",
+                "fixed_deficit",
+                "softplus_margin",
+            ):
                 with torch.no_grad():
                     z_bg = call_with_params(
                         image_encoder,
@@ -538,7 +618,13 @@ def main():
                 args.target_cls,
             )
 
-            if args.ablation_mode in ("full_bmr", "gain_only", "absolute_margin"):
+            if args.ablation_mode in (
+                "full_bmr",
+                "gain_only",
+                "fixed_deficit",
+                "softplus_margin",
+                "absolute_margin",
+            ):
                 background_margin = target_margin(
                     logits_bg,
                     args.target_cls,
@@ -561,6 +647,16 @@ def main():
                 if args.ablation_mode == "absolute_margin":
                     reserve_loss_per_sample = F.relu(
                         -attack_margin
+                    )
+                elif args.ablation_mode == "softplus_margin":
+                    reserve_loss_per_sample = F.softplus(
+                        -attack_margin
+                    )
+                elif args.ablation_mode == "fixed_deficit":
+                    fixed_d = attack_margin.new_tensor(fixed_deficit_value)
+                    reserve_loss_per_sample = torch.log1p(
+                        (fixed_d + RESERVE_NUMERIC_EPS)
+                        / (positive_margin_gain + RESERVE_NUMERIC_EPS)
                     )
                 elif args.ablation_mode == "gain_only":
                     # Preserve the batch-average numerator scale while
@@ -710,6 +806,16 @@ def main():
                     "margin_gain_min": float(
                         margin_gain.min().item()
                     ),
+                    "triggered_sample_count": int(margin_gain.numel()),
+                    "margin_gain_le_epsilon_rate": float(
+                        (margin_gain <= RESERVE_NUMERIC_EPS).float().mean().item()
+                    ),
+                    "margin_gain_le_zero_rate": float(
+                        (margin_gain <= 0).float().mean().item()
+                    ),
+                    "margin_gain_median": float(margin_gain.median().item()),
+                    "margin_gain_q10": float(torch.quantile(margin_gain, 0.10).item()),
+                    "margin_gain_q90": float(torch.quantile(margin_gain, 0.90).item()),
                     "margin_gain_positive_rate": float(
                         (
                             margin_gain > 0
@@ -841,6 +947,12 @@ def main():
             "background_deficit_median",
             "margin_gain_mean",
             "margin_gain_min",
+            "triggered_sample_count",
+            "margin_gain_le_epsilon_rate",
+            "margin_gain_le_zero_rate",
+            "margin_gain_median",
+            "margin_gain_q10",
+            "margin_gain_q90",
             "margin_gain_positive_rate",
             "reserve_valid_rate",
             "reserve_ratio_mean",
